@@ -1,94 +1,115 @@
 package crux.bphc.cms.activities
 
 import android.Manifest
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
+import android.view.MenuItem
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
-import com.google.android.material.bottomnavigation.BottomNavigationView
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import crux.bphc.cms.R
-import crux.bphc.cms.app.Constants
-import crux.bphc.cms.app.MyApplication
-import crux.bphc.cms.background.NotificationWorker
+import crux.bphc.cms.core.PushNotifRegManager
 import crux.bphc.cms.fragments.*
-import crux.bphc.cms.helper.NOTIFICATION_CHANNEL_UPDATES
-import crux.bphc.cms.helper.NOTIFICATION_CHANNEL_UPDATES_BUNDLE
+import crux.bphc.cms.helper.CourseDataHandler
 import crux.bphc.cms.models.UserAccount
 import crux.bphc.cms.models.course.Course
-import crux.bphc.cms.models.course.CourseSection
+import crux.bphc.cms.utils.UserUtils
 import io.realm.Realm
 import kotlinx.android.synthetic.main.activity_main.*
-import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var _realm: Realm
-    private lateinit var _userAccount: UserAccount
+    private lateinit var courseDataHandler: CourseDataHandler
 
-    private lateinit var _bottomNavSelectionListener: BottomNavigationView.OnNavigationItemSelectedListener
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        if (MyApplication.getInstance().isDarkModeEnabled) {
-            setTheme(R.style.AppTheme_NoActionBar_Dark)
-        }
-
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
-        setSupportActionBar(toolbar)
-        _userAccount = UserAccount(this)
-        Constants.TOKEN = _userAccount.token
-        _realm = Realm.getDefaultInstance()
-
-        _bottomNavSelectionListener = BottomNavigationView.OnNavigationItemSelectedListener{
-            menuItem ->
+    private val _bottomNavSelectionListener
+        get() = listener@ {
+            menuItem: MenuItem ->
             when (menuItem.itemId) {
                 R.id.myCoursesFragment -> {
                     pushView(MyCoursesFragment.newInstance(), "My Courses", true)
-                    return@OnNavigationItemSelectedListener true
+                    return@listener true
                 }
                 R.id.searchCourseFragment -> {
-                    pushView(SearchCourseForEnrolFragment.newInstance(Constants.TOKEN),
+                    pushView(SearchCourseForEnrolFragment.newInstance(UserAccount.token),
                             "Search Course to Enrol", false)
-                    return@OnNavigationItemSelectedListener true
+                    return@listener true
                 }
                 R.id.forumFragment -> {
                     pushView(ForumFragment.newInstance(), "Site News", false)
-                    return@OnNavigationItemSelectedListener true
+                    return@listener true
                 }
                 R.id.moreFragment -> {
                     pushView(MoreFragment.newInstance(), "More", false)
-                    return@OnNavigationItemSelectedListener true
+                    return@listener true
                 }
-                else -> return@OnNavigationItemSelectedListener false
+                else -> return@listener false
             }
         }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        if (!UserAccount.isLoggedIn) {
+           UserUtils.clearBackStackAndLaunchTokenActivity(this)
+            return
+        }
+
+        // Override the splash theme since it sets its own
+        // image background
+        if (UserAccount.isDarkModeEnabled) {
+            setTheme(R.style.AppTheme_NoActionBar_Dark)
+        } else {
+            setTheme(R.style.AppTheme_NoActionBar)
+        }
+
+        setContentView(R.layout.activity_main)
+        setSupportActionBar(toolbar)
+
         bottom_nav.setOnNavigationItemSelectedListener(_bottomNavSelectionListener)
+
+        _realm = Realm.getDefaultInstance()
+        courseDataHandler = CourseDataHandler(_realm)
 
         if (savedInstanceState == null) {
             pushView(MyCoursesFragment.newInstance(), "My Courses", true)
         }
 
         askPermission()
-        createNotificationChannels() // initialize channels before starting background service
-        // Enqueue background worker for course updates and notifications
-        val notifWorkRequest = PeriodicWorkRequestBuilder<NotificationWorker>(1, TimeUnit.HOURS)
-                .build()
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork("NotificationWorker",
-                ExistingPeriodicWorkPolicy.KEEP, notifWorkRequest)
+
+        // Register for push notifs if required
+        lifecycleScope.launch {
+            var toastResource = 0
+            if (UserAccount.isNotificationsEnabled && !PushNotifRegManager.isRegistered()) {
+                if (!PushNotifRegManager.registerDevice()) {
+                    if (UserAccount.isLoggedIn) { // We failed inspite being logged in
+                        toastResource = R.string.push_notif_reg_failure
+                    }
+                }
+            } else if (!UserAccount.isNotificationsEnabled && PushNotifRegManager.isRegistered()) {
+                if (!PushNotifRegManager.deregisterDevice()) {
+                    toastResource = R.string.push_notif_dereg_failure
+                }
+            }
+
+            if (toastResource != 0) {
+                val context = this@MainActivity
+                Toast.makeText(
+                    context,
+                    context.getString(toastResource),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+
         resolveIntent()
         resolveModuleLinkShare()
     }
@@ -105,6 +126,11 @@ class MainActivity : AppCompatActivity() {
             else -> bottom_nav.selectedItemId
         }
         bottom_nav.setOnNavigationItemSelectedListener(_bottomNavSelectionListener)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
     }
 
     private fun resolveModuleLinkShare() {
@@ -131,7 +157,7 @@ class MainActivity : AppCompatActivity() {
                 val host = uri.host
                 if (scheme != null && host != null && path != null) {
                     val fileUrl = String.format("%s://%s%s+?forcedownload=1&token=%s", scheme, host, path,
-                            _userAccount.token)
+                            UserAccount.token)
                     val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fileUrl))
                     startActivity(browserIntent)
                 }
@@ -141,82 +167,80 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Create channels for devices running Oreo and above; Can be safely called even if channel exists
-    private fun createNotificationChannels() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Create the "Updates Bundle" channel, which is channel for summary notifications that bundles thr
-            // individual notifications
-            val service = NotificationChannel(NOTIFICATION_CHANNEL_UPDATES_BUNDLE,
-                    "New Content Bundle",
-                    NotificationManager.IMPORTANCE_DEFAULT)
-            service.description = "A default priority channel that bundles all the notifications"
-
-            // Create the "Updates" channel which has the low importance level
-            val updates = NotificationChannel(NOTIFICATION_CHANNEL_UPDATES,
-                    "New Content",
-                    NotificationManager.IMPORTANCE_LOW)
-            updates.description = "All low importance channel that relays all the updates."
-            val nm = getSystemService(NotificationManager::class.java)
-            // create both channels
-            nm.createNotificationChannel(service)
-            nm.createNotificationChannel(updates)
-        }
-    }
-
     private fun resolveIntent() {
-        val courseId = intent.getIntExtra("courseId", -1)
-        val modId = intent.getIntExtra("modId", -1)
-        val forumId = intent.getIntExtra("forumId", -1)
-        val discussionId = intent.getIntExtra("discussionId", -1)
+        if (intent == null) return
 
-        if (courseId == -1) return
-        if (courseId == Constants.SITE_NEWS_COURSE_ID) {
-            // Site news, modId will not be -1
-            // We will push the fragment here itself
-            val forumFragment = ForumFragment.newInstance()
-            pushView(forumFragment, "Site News", false)
-
-            // Ensure that the fragment has been commited
-            supportFragmentManager.executePendingTransactions()
-            val discussionFragment = DiscussionFragment.newInstance(discussionId, "Site News")
-            pushView(discussionFragment, "Discussion", false)
-        }
-
-        if (modId == -1) {
-            val intent = Intent(this, CourseDetailActivity::class.java)
-            intent.putExtra("courseId", courseId)
-            startActivity(intent)
+        if (!intent.action.equals(Intent.ACTION_MAIN)) {
             return
         }
 
-        if (discussionId != -1) {
-            // Open up the discussion first
-            val intent = Intent(this, CourseDetailActivity::class.java)
-            intent.putExtra("courseId", courseId)
-            intent.putExtra("modId", modId)
-            intent.putExtra("forumId", forumId)
-            intent.putExtra("discussionId", discussionId)
-            startActivity(intent)
-            return
-        }
+        val contextUrl = intent.getStringExtra("contexturl") ?: ""
+        val courseId = (intent.getStringExtra("courseid") ?: "-1").toInt()
+        val customData = intent.getStringExtra("customdata") ?: ""
 
-        val realm = Realm.getDefaultInstance()
-        val courseSections = realm.copyFromRealm(realm.where(CourseSection::class.java)
-                .equalTo("courseId", courseId).findAll())
-        if (courseSections == null || courseSections.isEmpty()) return
-        for (module in courseSections.flatMap { it.modules }) {
-            if (module.id == modId) {
-                val intent = Intent(this, CourseDetailActivity::class.java)
-                intent.putExtra("courseId", courseId)
-                intent.putExtra("modId", modId)
-                startActivity(intent)
-                return
-            }
-        }
+        if (contextUrl == "" && courseId == -1) return
+
         val intent = Intent(this, CourseDetailActivity::class.java)
-        intent.putExtra("courseId", courseId)
-        intent.putExtra("discussionId", modId)
+        intent.putExtra(CourseDetailActivity.INTENT_CONTEXT_URL_KEY, contextUrl)
+        intent.putExtra(CourseDetailActivity.INTENT_COURSE_ID_KEY, courseId)
+        intent.putExtra(CourseDetailActivity.INTENT_CUSTOM_DATA_KEY, customData)
+
         startActivity(intent)
+        finish()
+
+//        val courseId = intent.getIntExtra("courseId", -1)
+//        val modId = intent.getIntExtra("modId", -1)
+//        val forumId = intent.getIntExtra("forumId", -1)
+//        val discussionId = intent.getIntExtra("discussionId", -1)
+//
+//        if (courseId == -1) return
+//        if (courseId == Constants.SITE_NEWS_COURSE_ID) {
+//            // Site news, modId will not be -1
+//            // We will push the fragment here itself
+//            val forumFragment = ForumFragment.newInstance()
+//            pushView(forumFragment, "Site News", false)
+//
+//            // Ensure that the fragment has been commited
+//            supportFragmentManager.executePendingTransactions()
+//            val discussionFragment = DiscussionFragment.newInstance(discussionId, "Site News")
+//            pushView(discussionFragment, "Discussion", false)
+//        }
+//
+//        if (modId == -1) {
+//            val intent = Intent(this, CourseDetailActivity::class.java)
+//            intent.putExtra("courseId", courseId)
+//            startActivity(intent)
+//            return
+//        }
+//
+//        if (discussionId != -1) {
+//            // Open up the discussion first
+//            val intent = Intent(this, CourseDetailActivity::class.java)
+//            intent.putExtra("courseId", courseId)
+//            intent.putExtra("modId", modId)
+//            intent.putExtra("forumId", forumId)
+//            intent.putExtra("discussionId", discussionId)
+//            startActivity(intent)
+//            return
+//        }
+//
+//        val realm = Realm.getDefaultInstance()
+//        val courseSections = realm.copyFromRealm(realm.where(CourseSection::class.java)
+//                .equalTo("courseId", courseId).findAll())
+//        if (courseSections == null || courseSections.isEmpty()) return
+//        for (module in courseSections.flatMap { it.modules }) {
+//            if (module.id == modId) {
+//                val intent = Intent(this, CourseDetailActivity::class.java)
+//                intent.putExtra("courseId", courseId)
+//                intent.putExtra("modId", modId)
+//                startActivity(intent)
+//                return
+//            }
+//        }
+//        val intent = Intent(this, CourseDetailActivity::class.java)
+//        intent.putExtra("courseId", courseId)
+//        intent.putExtra("discussionId", modId)
+//        startActivity(intent)
     }
 
     private fun askPermission() {
@@ -267,6 +291,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        _realm.close()
+        if (this::_realm.isInitialized) {
+            _realm.close()
+        }
     }
 }
