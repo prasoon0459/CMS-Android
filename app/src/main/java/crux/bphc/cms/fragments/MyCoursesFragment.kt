@@ -13,8 +13,8 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
-import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -28,7 +28,6 @@ import crux.bphc.cms.helper.CourseRequestHandler
 import crux.bphc.cms.interfaces.ClickListener
 import crux.bphc.cms.models.course.Course
 import crux.bphc.cms.models.course.CourseSection
-import crux.bphc.cms.models.course.Module
 import crux.bphc.cms.utils.UserUtils
 import io.realm.Realm
 import kotlinx.android.synthetic.main.fragment_my_courses.*
@@ -81,7 +80,7 @@ class MyCoursesFragment : Fragment() {
                 val courses = courseDataHandler.courseList
                 CoroutineScope(Dispatchers.Default).launch {
                     val realm = Realm.getDefaultInstance()
-                    val courseDataHandler = CourseDataHandler(requireContext(), realm)
+                    val courseDataHandler = CourseDataHandler(realm)
 
                     for (course in courses) {
                         val sections = courseDataHandler.getCourseData(course.id)
@@ -103,7 +102,7 @@ class MyCoursesFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        courseDataHandler = CourseDataHandler(requireContext(), realm)
+        courseDataHandler = CourseDataHandler(realm)
         courses = courseDataHandler.courseList
 
         moreOptionsViewModel = ViewModelProvider(requireActivity()).get(OptionsViewModel::class.java)
@@ -114,8 +113,7 @@ class MyCoursesFragment : Fragment() {
         mAdapter.clickListener = ClickListener { `object`: Any, position: Int ->
             val course = `object` as Course
             val intent = Intent(activity, CourseDetailActivity::class.java)
-            intent.putExtra("courseId", course.id)
-            intent.putExtra("course_name", course.shortName)
+            intent.putExtra(CourseDetailActivity.INTENT_COURSE_ID_KEY, course.id)
             courseDetailActivityLauncher.launch(intent)
             return@ClickListener true
         }
@@ -208,40 +206,44 @@ class MyCoursesFragment : Fragment() {
     }
 
     private fun refreshCourses() {
-        val courseRequestHandler = CourseRequestHandler(activity)
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val courseList = courseRequestHandler.fetchCourseListSync()
-                courses.clear()
-                courses.addAll(courseList)
-                val realm = Realm.getDefaultInstance() // tie a realm instance to this thread
-                val courseDataHandler = CourseDataHandler(requireContext(), realm)
-                courseDataHandler.replaceCourses(courseList)
-                realm.close()
-                checkEmpty()
-                updateCourseContent()
-            } catch (e : Exception) {
-                Log.e(TAG, "", e)
-                CoroutineScope(Dispatchers.Main).launch {
-                    Toast.makeText(requireActivity(), "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                    if (e is InvalidTokenException) {
-                        UserUtils.logout(requireActivity())
-                        UserUtils.clearBackStackAndLaunchTokenActivity(requireActivity())
+        lifecycleScope.launch {
+            launch(Dispatchers.IO) { // lifecycle scope allows cancellation of this scope
+                val courseRequestHandler = CourseRequestHandler()
+                try {
+                    val courseList = courseRequestHandler.fetchCourseListSync()
+                    courses.clear()
+                    courses.addAll(courseList)
+                    Log.i(TAG, "${courseList.size} courses")
+                    val realm = Realm.getDefaultInstance() // tie a realm instance to this thread
+                    val courseDataHandler = CourseDataHandler(realm)
+                    courseDataHandler.replaceCourses(courseList)
+                    realm.close()
+                    checkEmpty()
+                    updateCourseContent()
+                } catch (e: Exception) {
+                    Log.e(TAG, "", e)
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(requireActivity(), "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                        if (e is InvalidTokenException) {
+                            UserUtils.logout()
+                            UserUtils.clearBackStackAndLaunchTokenActivity(requireActivity())
+                        }
                     }
-                }
-            } finally {
-                CoroutineScope(Dispatchers.Main).launch {
-                    swipeRefreshLayout?.isRefreshing = false
+                } finally {
+                    withContext(Dispatchers.Main) {
+                        swipeRefreshLayout?.isRefreshing = false
+                    }
                 }
             }
         }
     }
 
     private suspend fun updateCourseContent() {
-        coroutineScope {
-            val courseRequestHandler = CourseRequestHandler(requireActivity())
+        withContext(Dispatchers.IO) {
+            Log.i(TAG, "Fetching course contents")
+            val courseRequestHandler = CourseRequestHandler()
             val promises = courses.map map@ {
-                async innerAsync@{
+                async innerAsync@ {
                     val sections: MutableList<CourseSection>
                     try {
                         sections = courseRequestHandler.getCourseDataSync(it.id)
@@ -251,23 +253,10 @@ class MyCoursesFragment : Fragment() {
                     }
 
                     val realm = Realm.getDefaultInstance() // tie a realm instance to this thread
-                    val courseDataHandler = CourseDataHandler(requireContext(), realm)
-
-                    for (courseSection in sections) {
-                        val modules = courseSection.modules
-                        for (module in modules) {
-                            if (module.modType == Module.Type.FORUM) {
-                                val discussions = courseRequestHandler
-                                        .getForumDicussionsSync(module.instance)
-                                for (d in discussions) {
-                                    d.forumId = module.instance
-                                }
-                            }
-                        }
-                    }
+                    val courseDataHandler = CourseDataHandler(realm)
 
                     val newPartsInSections = courseDataHandler
-                            .isolateNewCourseData(it.id, sections)
+                        .isolateNewCourseData(it.id, sections)
                     courseDataHandler.replaceCourseData(it.id, sections)
 
                     realm.close() // let's not forget to do this
@@ -277,9 +266,10 @@ class MyCoursesFragment : Fragment() {
                     return@innerAsync false
                 }
             }
+
             coursesUpdated = promises.awaitAll().fold(0) {i, x -> if (x) i + 1 else i }
 
-            CoroutineScope(Dispatchers.Main).launch {
+            withContext(Dispatchers.Main) {
                 swipeRefreshLayout?.isRefreshing = false
                 mAdapter.filterCoursesByName(courses, searchCourseET.text.toString())
                 val message: String = if (coursesUpdated == 0) {
@@ -341,7 +331,7 @@ class MyCoursesFragment : Fragment() {
             var filteredCourses: MutableList<Course> = ArrayList()
             if (courseName.isNotEmpty()) {
                 for (course in courseList) {
-                    if (course.fullName.toLowerCase(Locale.ROOT).contains(courseName)) {
+                    if (course.shortName.toLowerCase(Locale.ROOT).contains(courseName)) {
                         filteredCourses.add(course)
                     }
                 }

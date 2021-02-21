@@ -7,7 +7,6 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import com.google.android.gms.tasks.RuntimeExecutionException;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
@@ -22,6 +21,13 @@ import java.util.TreeSet;
 
 import crux.bphc.cms.exceptions.InvalidTokenException;
 import crux.bphc.cms.models.UserAccount;
+import crux.bphc.cms.models.course.Content;
+import crux.bphc.cms.models.course.Course;
+import crux.bphc.cms.models.course.CourseSection;
+import crux.bphc.cms.models.course.Module;
+import crux.bphc.cms.models.forum.Discussion;
+import crux.bphc.cms.models.forum.ForumData;
+import crux.bphc.cms.network.APIClient;
 import crux.bphc.cms.network.MoodleServices;
 import okhttp3.ResponseBody;
 import retrofit2.Call;
@@ -29,16 +35,6 @@ import retrofit2.Callback;
 import retrofit2.HttpException;
 import retrofit2.Response;
 import retrofit2.Retrofit;
-import retrofit2.converter.gson.GsonConverterFactory;
-import crux.bphc.cms.models.course.Content;
-import crux.bphc.cms.models.course.Course;
-import crux.bphc.cms.models.course.CourseSection;
-import crux.bphc.cms.models.course.Module;
-import crux.bphc.cms.models.forum.Discussion;
-import crux.bphc.cms.models.forum.ForumData;
-import retrofit2.http.HTTP;
-
-import static crux.bphc.cms.app.Constants.API_URL;
 
 /**
  * Class responsible for making API requests
@@ -56,12 +52,9 @@ public class CourseRequestHandler {
     final UserAccount userAccount;
     final MoodleServices moodleServices;
 
-    public CourseRequestHandler(Context context) {
-        userAccount = new UserAccount(context);
-        Retrofit retrofit = new Retrofit.Builder()
-                .baseUrl(API_URL)
-                .addConverterFactory(GsonConverterFactory.create())
-                .build();
+    public CourseRequestHandler() {
+        userAccount = UserAccount.INSTANCE;
+        Retrofit retrofit = APIClient.getRetrofitInstance();
         moodleServices = retrofit.create(MoodleServices.class);
     }
 
@@ -255,15 +248,11 @@ public class CourseRequestHandler {
 
 
     @NotNull
-    public List<Discussion> getForumDicussionsSync(int moduleId) {
+    public List<Discussion> getForumDicussionsSync(int moduleId) throws IOException {
         Call<ForumData> call = moodleServices.getForumDiscussions(userAccount.getToken(), moduleId, 0, 0);
-        try {
-            Response<ForumData> response = call.execute();
-            if (response.body() == null) return new ArrayList<>(0);
-            return response.body().getDiscussions();
-        } catch (Exception e) {
-            return new ArrayList<>(0);
-        }
+        Response<ForumData> response = call.execute();
+        if (response.body() == null) return new ArrayList<>(0);
+        return response.body().getDiscussions();
     }
 
     public void getForumDiscussions(int moduleId, @Nullable final CallBack<List<Discussion>> callBack) {

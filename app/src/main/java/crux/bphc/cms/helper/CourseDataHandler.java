@@ -1,6 +1,5 @@
 package crux.bphc.cms.helper;
 
-import android.content.Context;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -20,7 +19,6 @@ import crux.bphc.cms.models.course.CourseSection;
 import crux.bphc.cms.models.course.Module;
 import crux.bphc.cms.models.forum.Discussion;
 import io.realm.Realm;
-
 import io.realm.RealmList;
 import io.realm.RealmResults;
 import io.realm.Sort;
@@ -40,18 +38,15 @@ public class CourseDataHandler {
     @SuppressWarnings("unused")
     private final static String TAG = CourseDataHandler.class.getName();
 
-    private final UserAccount userAccount;
     private Realm realm;
 
     /**
      * Construct a CourseDataHandler object for handling data.
      *
-     * @param context Application or Activity context.
      * @param realm Realm instance. Can be null. However, set realm instance using
                     {@link #setRealmInstance} before calling a data functions.
      */
-    public CourseDataHandler(@NotNull Context context, @Nullable Realm realm) {
-        userAccount = new UserAccount(context);
+    public CourseDataHandler(@Nullable Realm realm) {
         this.realm = realm;
     }
 
@@ -268,7 +263,7 @@ public class CourseDataHandler {
     }
 
     public List<Discussion> setForumDiscussions(int forumId, List<Discussion> discussions) {
-        if (!userAccount.isLoggedIn()) {
+        if (!UserAccount.INSTANCE.isLoggedIn()) {
             return null;
         }
         List<Discussion> newDiscussions = new ArrayList<>();
@@ -278,12 +273,39 @@ public class CourseDataHandler {
                 newDiscussions.add(discussion);
             }
         }
-        realm.beginTransaction();
-        realm.where(Discussion.class).equalTo("forumId", forumId).findAll().deleteAllFromRealm();
-        realm.copyToRealm(discussions);
-        realm.commitTransaction();
+        realm.executeTransactionAsync(r -> {
+            r.where(Discussion.class).equalTo("forumId", forumId).findAll().deleteAllFromRealm();
+            r.copyToRealm(discussions);
+        });
         return newDiscussions;
+    }
 
+    @Nullable
+    public Module getModuleByModId(int modId) {
+        RealmResults<Module> modules = realm.where(Module.class).equalTo("id", modId).findAll();
+
+        if (modules.isEmpty()) {
+            return null;
+        } else {
+            return modules.first();
+        }
+    }
+
+    @Nullable
+    public CourseSection getSectionBySectionNum(int courseId, int sectionNum) {
+        RealmResults<CourseSection> sections = realm.where(CourseSection.class)
+                .equalTo("courseId", courseId)
+                .equalTo("sectionNum", sectionNum).findAll();
+
+        if (sections.isEmpty()) {
+            return null;
+        } else {
+            return sections.first();
+        }
+    }
+
+    public List<Discussion> getForumDiscussions(int forumId) {
+        return realm.where(Discussion.class).equalTo("forumId", forumId).findAll();
     }
 
     public void deleteCourse(int courseId) {
